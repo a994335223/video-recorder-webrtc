@@ -217,3 +217,91 @@ class WebRTCPlayer:
         while not self.frame_queue.empty():
             self.frame_queue.get_nowait()
         return True
+
+class VideoPlayer:
+    """视频播放器，负责本地视频文件的加载与播放"""
+    def __init__(self, source=None):
+        self.source = source
+        self.cap = None
+        self.is_open = False
+        self.is_playing = False
+        self.is_paused = False
+        self.is_source = False
+        self.current_frame = None
+        self.frame_count = 0
+        self.fps = 0
+        self.duration = 0
+        self.position = 0
+        self.frame_callbacks = []
+        self.playback_callbacks = []
+        self.progress_callbacks = []
+        self.lock = threading.Lock()
+        self._play_thread = None
+        self._user_seeking = False
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        
+    def open(self):
+        """打开视频源"""
+        if self.is_open:
+            self.close()
+            
+        if not self.source:
+            return False
+            
+        try:
+            self.cap = cv2.VideoCapture(self.source)
+            if not self.cap.isOpened():
+                logging.error(f"无法打开视频源: {self.source}")
+                return False
+                
+            self.is_open = True
+            self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+            if self.fps <= 0:
+                self.fps = 30.0
+            
+            self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            if self.frame_count > 0:
+                self.duration = self.frame_count / self.fps
+            else:
+                self.duration = 0
+                
+            # 读取第一帧
+            ret, self.current_frame = self.cap.read()
+            if not ret:
+                logging.error("无法读取第一帧")
+                self.close()
+                return False
+                
+            self.position = 0
+            self._notify_callbacks()
+            
+            logging.info(f"已打开视频: {self.source}, 帧数: {self.frame_count}, FPS: {self.fps:.2f}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"打开视频时发生错误: {str(e)}")
+            if self.cap:
+                self.cap.release()
+                self.cap = None
+            self.is_open = False
+            return False
+            
+    def close(self):
+        """关闭视频源"""
+        self._stop_event.set()
+        if self._play_thread and self._play_thread.is_alive():
+            self._play_thread.join(timeout=1.0)
+            
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+            
+        self.is_open = False
+        self.is_playing = False
+        self._pause_event.clear()
+        self._stop_event.clear()
+        return True
