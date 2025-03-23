@@ -535,32 +535,52 @@ class MainWindow:
         self.root.minsize(800, 600)
         self.root.configure(bg=THEME_COLORS['bg_main'])
         
-        # 创建菜单
-        self.create_menu()
+        # 创建主要组件
+        self.create_widgets()
         
-        # 创建工具栏
+        # 录制相关变量初始化
+        self.initialize_recording_vars()
+        
+        # 播放器初始化
+        self.initialize_players()
+        
+        # 状态更新和快捷键绑定
+        self.setup_ui_updates()
+        
+    def create_widgets(self):
+        """创建所有UI组件"""
+        # 创建菜单和工具栏
+        self.create_menu()
         self.create_toolbar()
         
         # 主内容区域
         self.main_frame = ttk.Frame(self.root)
         self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        # 创建视频画布
+        # 创建视频画布和控制面板
         self.create_video_canvas()
-        
-        # 创建控制区域
         self.create_control_panel()
-        
-        # 创建状态栏
         self.create_status_bar()
         
-        # 录制相关变量
+    def initialize_recording_vars(self):
+        """初始化录制相关变量"""
         self.is_recording = False
         self.record_start_time = None
         self.recorder = None
         self.videowriter = None
         self.recording_filename = None
         
+        # 确保录像目录存在
+        self.recordings_dir = "recordings"
+        os.makedirs(self.recordings_dir, exist_ok=True)
+        
+        # 录制设置
+        self.recording_fps = 30
+        self.recording_codec = "XVID"
+        self.recording_format = "avi"
+        
+    def initialize_players(self):
+        """初始化视频播放器"""
         # WebRTC播放器
         self.webrtc_player = WebRTCPlayer()
         self.webrtc_player.set_frame_callback(self.on_webrtc_frame)
@@ -578,10 +598,8 @@ class MainWindow:
         # 锁定控制以避免竞争条件
         self.control_lock = threading.Lock()
         
-        # 确保录像目录存在
-        self.recordings_dir = "recordings"
-        os.makedirs(self.recordings_dir, exist_ok=True)
-        
+    def setup_ui_updates(self):
+        """设置UI更新和快捷键"""
         # 绑定键盘快捷键
         self.bind_shortcuts()
         
@@ -605,3 +623,120 @@ class MainWindow:
         
         # 在启动应用后显示使用提示
         self.root.after(1000, self.show_startup_tips)
+        
+    def create_menu(self):
+        """创建应用菜单"""
+        self.menu = tk.Menu(self.root)
+        self.root.config(menu=self.menu)
+        
+        # 文件菜单
+        file_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="文件", menu=file_menu)
+        file_menu.add_command(label="打开WebRTC流", command=self.open_webrtc_stream)
+        file_menu.add_command(label="打开本地视频", command=self.open_local_video)
+        file_menu.add_separator()
+        file_menu.add_command(label="保存当前帧", command=self.save_current_frame)
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self.root.quit)
+        
+        # 录制菜单
+        record_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="录制", menu=record_menu)
+        record_menu.add_command(label="开始/停止录制", command=self.toggle_recording)
+        record_menu.add_command(label="录制设置", command=self.show_recording_settings)
+        record_menu.add_separator()
+        record_menu.add_command(label="打开录制文件夹", command=self.open_recordings_folder)
+        
+        # 视图菜单
+        view_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="视图", menu=view_menu)
+        view_menu.add_command(label="重置视频尺寸", command=self.reset_video_size)
+        
+        # 工具菜单
+        tools_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="工具", menu=tools_menu)
+        tools_menu.add_command(label="添加关键帧标记", command=self.add_keyframe)
+        tools_menu.add_command(label="清除所有标记", command=self.clear_keyframes)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="自动测试...", command=self.start_auto_test)
+        
+        # 帮助菜单
+        help_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="帮助", menu=help_menu)
+        help_menu.add_command(label="使用说明", command=self.show_help)
+        help_menu.add_command(label="关于", command=self.show_about)
+        
+    def create_toolbar(self):
+        """创建工具栏"""
+        # 样式配置
+        style = ttk.Style()
+        style.configure('Toolbar.TFrame', background=THEME_COLORS['bg_secondary'])
+        
+        self.toolbar = ttk.Frame(self.root, style='Toolbar.TFrame')
+        self.toolbar.pack(side=tk.TOP, fill=tk.X)
+        
+        # 连接WebRTC按钮
+        self.btn_connect = ttk.Button(self.toolbar, text="连接直播", command=self.open_webrtc_stream)
+        self.btn_connect.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # 打开本地视频按钮
+        self.btn_open = ttk.Button(self.toolbar, text="打开视频", command=self.open_local_video)
+        self.btn_open.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # 录制按钮
+        self.btn_record = ttk.Button(self.toolbar, text="开始录制", command=self.toggle_recording)
+        self.btn_record.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # 截图按钮
+        self.btn_snapshot = ttk.Button(self.toolbar, text="截图", command=self.save_current_frame)
+        self.btn_snapshot.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # 关键帧按钮
+        self.btn_keyframe = ttk.Button(self.toolbar, text="标记关键帧", command=self.add_keyframe)
+        self.btn_keyframe.pack(side=tk.LEFT, padx=5, pady=5)
+        
+    def create_video_canvas(self):
+        """创建视频显示区域"""
+        # 视频展示区
+        self.video_frame = ttk.Frame(self.main_frame)
+        self.video_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        # 创建画布
+        self.canvas = tk.Canvas(self.video_frame, bg="black", highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # 显示无视频信号的初始图像
+        self.display_frame(self.no_video_frame)
+        
+        # 为画布添加右键菜单
+        self.canvas_menu = tk.Menu(self.canvas, tearoff=0)
+        self.canvas_menu.add_command(label="截图", command=self.save_current_frame)
+        self.canvas_menu.add_command(label="标记关键帧", command=self.add_keyframe)
+        self.canvas_menu.add_separator()
+        self.canvas_menu.add_command(label="重置视频尺寸", command=self.reset_video_size)
+        
+        # 绑定右键菜单
+        self.canvas.bind("<Button-3>", self.show_canvas_menu)
+        
+        # 绑定画布大小变化事件
+        self.canvas.bind("<Configure>", self.on_canvas_resize)
+        
+    def create_status_bar(self):
+        """创建状态栏"""
+        # 状态栏
+        self.status_frame = ttk.Frame(self.root)
+        self.status_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # 左侧状态信息
+        self.status_left = ttk.Label(self.status_frame, text="就绪")
+        self.status_left.pack(side=tk.LEFT, padx=10)
+        
+        # 右侧状态信息(录制状态)
+        self.status_right = ttk.Label(self.status_frame, text="")
+        self.status_right.pack(side=tk.RIGHT, padx=10)
+        
+    def create_control_panel(self):
+        """创建控制面板"""
+        # 控制面板
+        self.control_frame = ttk.Frame(self.main_frame)
+        self.control_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
