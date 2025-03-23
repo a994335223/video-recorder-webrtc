@@ -305,3 +305,484 @@ class VideoPlayer:
         self._pause_event.clear()
         self._stop_event.clear()
         return True
+        
+    def play(self):
+        """开始播放视频"""
+        if not self.is_open:
+            return False
+            
+        if self.is_playing:
+            if self.is_paused:
+                self.is_paused = False
+                self._pause_event.set()
+                self._notify_playback_callback(True)
+            return True
+            
+        self._stop_event.clear()
+        self._pause_event.clear()
+        self.is_playing = True
+        self.is_paused = False
+        
+        # 启动播放线程
+        self._play_thread = threading.Thread(target=self._play_thread_func)
+        self._play_thread.daemon = True
+        self._play_thread.start()
+        
+        self._notify_playback_callback(True)
+        return True
+        
+    def pause(self):
+        """暂停视频播放"""
+        if not self.is_playing or self.is_paused:
+            return False
+            
+        self.is_paused = True
+        self._pause_event.clear()
+        self._notify_playback_callback(False)
+        return True
+        
+    def stop(self):
+        """停止视频播放"""
+        if not self.is_playing:
+            return False
+            
+        self._stop_event.set()
+        if self._play_thread and self._play_thread.is_alive():
+            self._play_thread.join(timeout=1.0)
+            
+        self.is_playing = False
+        self.is_paused = False
+        self._pause_event.clear()
+        
+        # 重置到第一帧
+        if self.cap and self.is_open:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, self.current_frame = self.cap.read()
+            if ret:
+                self.position = 0
+                self._notify_callbacks()
+                
+        self._notify_playback_callback(False)
+        return True
+        
+    def seek(self, position):
+        """跳转到指定时间点(秒)"""
+        if not self.is_open or not self.cap:
+            return False
+            
+        position = max(0, min(position, self.duration))
+        
+        # 计算对应的帧位置
+        frame_pos = int(position * self.fps)
+        frame_pos = min(frame_pos, self.frame_count - 1) if self.frame_count > 0 else frame_pos
+        
+        with self.lock:
+            self._user_seeking = True
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+            ret, self.current_frame = self.cap.read()
+            if ret:
+                self.position = position
+                self._notify_callbacks()
+            else:
+                logging.error(f"无法跳转到位置: {position}秒")
+            self._user_seeking = False
+            
+        return ret
+        
+    def seek_frame(self, frame_pos):
+        """跳转到指定帧号"""
+        if not self.is_open or not self.cap:
+            return False
+            
+        frame_pos = max(0, frame_pos)
+        if self.frame_count > 0:
+            frame_pos = min(frame_pos, self.frame_count - 1)
+            
+        with self.lock:
+            self._user_seeking = True
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+            ret, self.current_frame = self.cap.read()
+            if ret:
+                self.position = frame_pos / self.fps if self.fps > 0 else 0
+                self._notify_callbacks()
+            else:
+                logging.error(f"无法跳转到帧: {frame_pos}")
+            self._user_seeking = False
+            
+        return ret
+        
+    def get_current_frame(self):
+        """获取当前帧"""
+        with self.lock:
+            return self.current_frame.copy() if self.current_frame is not None else None
+            
+    def add_frame_callback(self, callback):
+        """添加帧更新回调函数"""
+        if callback not in self.frame_callbacks:
+            self.frame_callbacks.append(callback)
+            
+    def add_playback_callback(self, callback):
+        """添加播放状态回调函数"""
+        if callback not in self.playback_callbacks:
+            self.playback_callbacks.append(callback)
+            
+    def add_progress_callback(self, callback):
+        """添加进度更新回调函数"""
+        if callback not in self.progress_callbacks:
+            self.progress_callbacks.append(callback)
+            
+    def remove_frame_callback(self, callback):
+        """移除帧更新回调函数"""
+        if callback in self.frame_callbacks:
+            self.frame_callbacks.remove(callback)
+            
+    def remove_playback_callback(self, callback):
+        """移除播放状态回调函数"""
+        if callback in self.playback_callbacks:
+            self.playback_callbacks.remove(callback)
+            
+    def remove_progress_callback(self, callback):
+        """移除进度更新回调函数"""
+        if callback in self.progress_callbacks:
+            self.progress_callbacks.remove(callback)
+            
+    def _notify_frame_callback(self, frame):
+        """通知帧更新回调函数"""
+        for callback in self.frame_callbacks:
+            try:
+                callback(frame)
+            except Exception as e:
+                logging.error(f"帧回调函数错误: {str(e)}")
+                
+    def _notify_playback_callback(self, is_playing):
+        """通知播放状态回调函数"""
+        for callback in self.playback_callbacks:
+            try:
+                callback(is_playing, self.is_paused)
+            except Exception as e:
+                logging.error(f"播放回调函数错误: {str(e)}")
+                
+    def _notify_progress_callback(self):
+        """通知进度更新回调函数"""
+        for callback in self.progress_callbacks:
+            try:
+                callback(self.position, self.duration)
+            except Exception as e:
+                logging.error(f"进度回调函数错误: {str(e)}")
+                
+    def _notify_callbacks(self):
+        """通知所有回调函数"""
+        if self.current_frame is not None:
+            self._notify_frame_callback(self.current_frame)
+            self._notify_progress_callback()
+            
+    def _play_thread_func(self):
+        """播放线程函数"""
+        try:
+            # 计算帧间隔时间
+            frame_time = 1.0 / self.fps
+            
+            while not self._stop_event.is_set():
+                # 处理暂停
+                if self.is_paused:
+                    self._pause_event.wait(0.1)
+                    continue
+                    
+                if self._user_seeking:
+                    time.sleep(0.01)
+                    continue
+                    
+                with self.lock:
+                    if not self.cap or not self.is_open:
+                        break
+                        
+                    # 读取下一帧
+                    start_time = time.time()
+                    ret, frame = self.cap.read()
+                    
+                    if not ret:
+                        # 到达视频末尾，重置到开始
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        ret, frame = self.cap.read()
+                        if not ret:
+                            break
+                            
+                    # 更新当前帧和位置
+                    self.current_frame = frame
+                    self.position = self.cap.get(cv2.CAP_PROP_POS_FRAMES) / self.fps
+                    
+                # 通知回调
+                self._notify_callbacks()
+                
+                # 计算并等待下一帧的时间
+                elapsed = time.time() - start_time
+                sleep_time = max(0, frame_time - elapsed)
+                time.sleep(sleep_time)
+                
+        except Exception as e:
+            logging.error(f"播放线程错误: {str(e)}")
+        finally:
+            self.is_playing = False
+            self.is_paused = False
+            self._notify_playback_callback(False)
+
+class VideoRecordingApp:
+    """视频录制应用，包括WebRTC直播源和本地录制功能"""
+    def __init__(self, root):
+        self.root = root
+        self.root.title("视频录制与回放系统")
+        self.root.geometry("1280x720")
+        self.root.minsize(800, 600)
+        self.root.configure(bg=THEME_COLORS['bg_main'])
+        
+        # 创建菜单
+        self.create_menu()
+        
+        # 创建工具栏
+        self.create_toolbar()
+        
+        # 主内容区域
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # 创建视频画布
+        self.create_video_canvas()
+        
+        # 创建控制区域
+        self.create_control_panel()
+        
+        # 创建状态栏
+        self.create_status_bar()
+        
+        # 录制相关变量
+        self.is_recording = False
+        self.record_start_time = None
+        self.recorder = None
+        self.videowriter = None
+        self.recording_filename = None
+        
+        # WebRTC播放器
+        self.webrtc_player = WebRTCPlayer()
+        self.webrtc_player.set_frame_callback(self.on_webrtc_frame)
+        self.webrtc_player.set_playback_callback(self.on_webrtc_playback_state)
+        
+        # 本地视频播放器
+        self.video_player = VideoPlayer()
+        self.video_player.add_frame_callback(self.on_video_frame)
+        self.video_player.add_playback_callback(self.on_video_playback_state)
+        self.video_player.add_progress_callback(self.on_video_progress)
+        
+        # 当前活动的播放器
+        self.active_player = None
+        
+        # 锁定控制以避免竞争条件
+        self.control_lock = threading.Lock()
+        
+        # 确保录像目录存在
+        self.recordings_dir = "recordings"
+        os.makedirs(self.recordings_dir, exist_ok=True)
+        
+        # 绑定键盘快捷键
+        self.bind_shortcuts()
+        
+        # 启动计时器更新UI状态
+        self.update_status()
+        
+        # 保存一个空白帧，用于显示"无视频"状态
+        self.no_video_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(self.no_video_frame, "无视频信号", (220, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        
+        # 用于记录关键点的变量
+        self.keyframes = []
+        self.keyframe_markers = []
+        
+        # 自动化测试变量
+        self.recording_base_name = None  # 基本文件名（不含扩展名）
+        self.auto_test_active = False     # 是否启动了自动测试
+        self.test_commands = []           # 测试命令列表
+        self.current_test_command = 0     # 当前执行的命令索引
+        self.test_timer = None           # 测试定时器
+        
+        # 在启动应用后显示使用提示
+        self.root.after(1000, self.show_startup_tips)
+    
+    def create_menu(self):
+        """创建应用菜单"""
+        self.menu = tk.Menu(self.root)
+        self.root.config(menu=self.menu)
+        
+        # 文件菜单
+        file_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="文件", menu=file_menu)
+        file_menu.add_command(label="打开WebRTC流", command=self.open_webrtc_stream)
+        file_menu.add_command(label="打开本地视频", command=self.open_local_video)
+        file_menu.add_separator()
+        file_menu.add_command(label="保存当前帧", command=self.save_current_frame)
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self.root.quit)
+        
+        # 录制菜单
+        record_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="录制", menu=record_menu)
+        record_menu.add_command(label="开始/停止录制", command=self.toggle_recording)
+        record_menu.add_command(label="录制设置", command=self.show_recording_settings)
+        record_menu.add_separator()
+        record_menu.add_command(label="打开录制文件夹", command=self.open_recordings_folder)
+        
+        # 视图菜单
+        view_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="视图", menu=view_menu)
+        view_menu.add_command(label="重置视频尺寸", command=self.reset_video_size)
+        
+        # 工具菜单
+        tools_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="工具", menu=tools_menu)
+        tools_menu.add_command(label="添加关键帧标记", command=self.add_keyframe)
+        tools_menu.add_command(label="清除所有标记", command=self.clear_keyframes)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="自动测试...", command=self.start_auto_test)
+        
+        # 帮助菜单
+        help_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="帮助", menu=help_menu)
+        help_menu.add_command(label="使用说明", command=self.show_help)
+        help_menu.add_command(label="关于", command=self.show_about)
+        
+    def create_toolbar(self):
+        """创建工具栏"""
+        # 样式配置
+        style = ttk.Style()
+        style.configure('Toolbar.TFrame', background=THEME_COLORS['bg_secondary'])
+        
+        self.toolbar = ttk.Frame(self.root, style='Toolbar.TFrame')
+        self.toolbar.pack(side=tk.TOP, fill=tk.X)
+        
+        # 连接WebRTC按钮
+        self.btn_connect = ttk.Button(self.toolbar, text="连接直播", command=self.open_webrtc_stream)
+        self.btn_connect.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # 打开本地视频按钮
+        self.btn_open = ttk.Button(self.toolbar, text="打开视频", command=self.open_local_video)
+        self.btn_open.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # 录制按钮
+        self.btn_record = ttk.Button(self.toolbar, text="开始录制", command=self.toggle_recording)
+        self.btn_record.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # 截图按钮
+        self.btn_snapshot = ttk.Button(self.toolbar, text="截图", command=self.save_current_frame)
+        self.btn_snapshot.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # 关键帧按钮
+        self.btn_keyframe = ttk.Button(self.toolbar, text="标记关键帧", command=self.add_keyframe)
+        self.btn_keyframe.pack(side=tk.LEFT, padx=5, pady=5)
+        
+    def create_video_canvas(self):
+        """创建视频显示区域"""
+        # 视频展示区
+        self.video_frame = ttk.Frame(self.main_frame)
+        self.video_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        # 创建画布
+        self.canvas = tk.Canvas(self.video_frame, bg="black", highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # 显示无视频信号的初始图像
+        self.display_frame(self.no_video_frame)
+        
+        # 为画布添加右键菜单
+        self.canvas_menu = tk.Menu(self.canvas, tearoff=0)
+        self.canvas_menu.add_command(label="截图", command=self.save_current_frame)
+        self.canvas_menu.add_command(label="标记关键帧", command=self.add_keyframe)
+        self.canvas_menu.add_separator()
+        self.canvas_menu.add_command(label="重置视频尺寸", command=self.reset_video_size)
+        
+        # 绑定右键菜单
+        self.canvas.bind("<Button-3>", self.show_canvas_menu)
+        
+        # 绑定画布大小变化事件
+        self.canvas.bind("<Configure>", self.on_canvas_resize)
+        
+    def create_control_panel(self):
+        """创建控制面板"""
+        # 控制面板
+        self.control_frame = ttk.Frame(self.main_frame)
+        self.control_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+        
+        # 播放控制
+        self.playback_frame = ttk.Frame(self.control_frame)
+        self.playback_frame.pack(side=tk.TOP, fill=tk.X)
+        
+        # 进度条
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Scale(self.playback_frame, from_=0, to=100, 
+                                     orient=tk.HORIZONTAL, variable=self.progress_var,
+                                     command=self.on_progress_change)
+        self.progress_bar.pack(side=tk.TOP, fill=tk.X, expand=True, padx=10, pady=5)
+        
+        # 时间显示
+        self.time_frame = ttk.Frame(self.playback_frame)
+        self.time_frame.pack(side=tk.TOP, fill=tk.X, padx=10)
+        
+        self.current_time_label = ttk.Label(self.time_frame, text="00:00:00.000")
+        self.current_time_label.pack(side=tk.LEFT)
+        
+        self.duration_label = ttk.Label(self.time_frame, text="/ 00:00:00.000")
+        self.duration_label.pack(side=tk.LEFT)
+        
+        # 关键帧标记显示在进度条上方
+        self.keyframe_canvas = tk.Canvas(self.playback_frame, height=10, bg=THEME_COLORS['bg_secondary'],
+                                        highlightthickness=0)
+        self.keyframe_canvas.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 5))
+        
+        # 播放控制按钮
+        self.buttons_frame = ttk.Frame(self.playback_frame)
+        self.buttons_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+        
+        self.btn_prev = ttk.Button(self.buttons_frame, text="上一帧", command=self.prev_frame)
+        self.btn_prev.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_play = ttk.Button(self.buttons_frame, text="播放", command=self.toggle_play)
+        self.btn_play.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_next = ttk.Button(self.buttons_frame, text="下一帧", command=self.next_frame)
+        self.btn_next.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_stop = ttk.Button(self.buttons_frame, text="停止", command=self.stop_playback)
+        self.btn_stop.pack(side=tk.LEFT, padx=5)
+        
+        # 连接信息
+        self.conn_label = ttk.Label(self.buttons_frame, text="未连接")
+        self.conn_label.pack(side=tk.RIGHT, padx=10)
+        
+        # 关键帧列表
+        self.keyframes_frame = ttk.LabelFrame(self.control_frame, text="关键帧列表")
+        self.keyframes_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
+        
+        self.keyframes_list = tk.Listbox(self.keyframes_frame, height=3, 
+                                       bg=THEME_COLORS['bg_secondary'], 
+                                       fg=THEME_COLORS['text'],
+                                       selectbackground=THEME_COLORS['highlight'])
+        self.keyframes_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 关键帧列表滚动条
+        self.keyframes_scrollbar = ttk.Scrollbar(self.keyframes_frame, orient=tk.VERTICAL, 
+                                                command=self.keyframes_list.yview)
+        self.keyframes_list.config(yscrollcommand=self.keyframes_scrollbar.set)
+        self.keyframes_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+        
+        # 关键帧按钮
+        self.keyframes_buttons = ttk.Frame(self.keyframes_frame)
+        self.keyframes_buttons.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
+        
+        self.btn_goto_keyframe = ttk.Button(self.keyframes_buttons, text="跳转", 
+                                          command=self.goto_selected_keyframe)
+        self.btn_goto_keyframe.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_remove_keyframe = ttk.Button(self.keyframes_buttons, text="移除", 
+                                           command=self.remove_selected_keyframe)
+        self.btn_remove_keyframe.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_clear_keyframes = ttk.Button(self.keyframes_buttons, text="清空", 
+                                           command=self.clear_keyframes)
+        self.btn_clear_keyframes.pack(side=tk.LEFT, padx=5)
